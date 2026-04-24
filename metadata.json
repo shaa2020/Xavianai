@@ -1,0 +1,6 @@
+{
+  "name": "Xavian Care AI",
+  "description": "Intelligent baby-care assistant for real-time tracking, AI-powered health monitoring, and parental co-pilot support.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": []
+}

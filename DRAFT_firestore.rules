@@ -1,0 +1,105 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ==========================================
+    // 0. GLOBAL SAFETY NET
+    // ==========================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ==========================================
+    // 1. PRIMITIVES & HELPERS
+    // ==========================================
+    function isSignedIn() { return request.auth != null; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // Mandatory Size & Type Enforcements
+    function isValidId(id) { 
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+    
+    function isMember(familyId) {
+      return isSignedIn() && 
+             (request.auth.uid in get(/databases/$(database)/documents/families/$(familyId)).data.parents);
+    }
+
+    // ==========================================
+    // 2. USER PROFILES
+    // ==========================================
+    match /users/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      
+      function isValidUser(data) {
+        return data.keys().hasAll(['uid', 'displayName', 'email', 'familyId', 'photoURL']) &&
+               data.keys().size() <= 6 &&
+               data.uid == request.auth.uid &&
+               data.displayName is string && data.displayName.size() <= 100 &&
+               data.email is string && data.email.size() <= 100 &&
+               data.familyId is string && data.familyId.size() <= 128;
+      }
+      
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidUser(incoming());
+      allow update: if isSignedIn() && request.auth.uid == userId && 
+                       isValidUser(incoming()) &&
+                       incoming().uid == existing().uid; // Immutable UID
+    }
+
+    // ==========================================
+    // 3. FAMILIES (The Master Gate)
+    // ==========================================
+    match /families/{familyId} {
+      allow read: if isSignedIn(); // Allow discovery, but actual data access is via subcollections
+      
+      function isValidFamily(data) {
+        return data.parents is list && data.parents.size() >= 1 && data.parents.size() <= 10 &&
+               data.babyName is string && data.babyName.size() <= 100;
+               // Optional fields validated during update
+      }
+
+      allow create: if isSignedIn() && 
+                       isValidId(familyId) && 
+                       isValidFamily(incoming()) &&
+                       (request.auth.uid in incoming().parents);
+
+      allow update: if isSignedIn() && (
+        // Action: Join
+        (incoming().diff(existing()).affectedKeys().hasOnly(['parents']) && 
+         request.auth.uid in incoming().parents && 
+         incoming().parents.size() == existing().parents.size() + 1) ||
+        
+        // Action: Update Vitals/Checklist (Member only)
+        (isMember(familyId) && 
+         incoming().parents == existing().parents && // Immutable parents
+         incoming().diff(existing()).affectedKeys().hasAny(['lastAction', 'weight', 'height', 'dailyChecklist', 'babyName']))
+      );
+    }
+
+    // ==========================================
+    // 4. CARE LOGS (Strict Relational Access)
+    // ==========================================
+    match /families/{familyId}/logs/{logId} {
+      
+      function isValidLog(data) {
+        return data.keys().hasAll(['type', 'familyId', 'parentId', 'timestamp', 'rawInput']) &&
+               data.type in ['feeding', 'sleep', 'diaper', 'health', 'behavior', 'medication', 'general_query'] &&
+               data.familyId == familyId &&
+               data.parentId == request.auth.uid && // Identity Integrity
+               data.timestamp == request.time && // Temporal Integrity
+               data.rawInput is string && data.rawInput.size() <= 1000;
+      }
+
+      allow list: if isMember(familyId);
+      allow get: if isMember(familyId);
+      
+      allow create: if isMember(familyId) && 
+                       isValidId(logId) && 
+                       isValidLog(incoming());
+                       
+      allow update: if false; // Logs are immutable - record of truth
+      allow delete: if isMember(familyId);
+    }
+  }
+}
